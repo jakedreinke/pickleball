@@ -143,6 +143,8 @@ export default function App() {
   };
 
   const lastSync = useRef("");
+  const dirty = useRef(false);       // a local change is pending/just-made
+  const lastWriteAt = useRef(0);     // when we last saved to the server
   const DEFAULT_SETTINGS = { defaultLocation: "Sharon", ownerPhone: "" };
   const snapshot = (f, g, l, st) => JSON.stringify({ friends: f, games: g, log: l, settings: st });
   const normalize = (s) => ({
@@ -169,9 +171,12 @@ export default function App() {
     if (!loaded) return;
     const payload = snapshot(friends, games, log, settings);
     if (payload === lastSync.current) return; // nothing actually changed
-    const t = setTimeout(() => {
+    dirty.current = true; // mark unsaved so a background refresh won't overwrite it
+    const t = setTimeout(async () => {
+      await saveState({ friends, games, log, settings });
       lastSync.current = payload;
-      saveState({ friends, games, log, settings });
+      lastWriteAt.current = Date.now();
+      dirty.current = false;
     }, 350);
     return () => clearTimeout(t);
   }, [friends, games, log, settings, loaded]);
@@ -179,7 +184,12 @@ export default function App() {
   useEffect(() => {
     if (!loaded) return;
     const iv = setInterval(async () => {
-      const o = normalize(await loadState());
+      if (dirty.current) return;                 // unsaved local change — don't touch it
+      const remoteState = await loadState();
+      if (!remoteState) return;                  // empty/failed read — never wipe to defaults
+      if (dirty.current) return;                 // a change happened while we were fetching
+      if (Date.now() - lastWriteAt.current < 6000) return; // just saved; let the server settle
+      const o = normalize(remoteState);
       const remote = snapshot(o.friends, o.games, o.log, o.settings);
       if (remote !== lastSync.current) {
         lastSync.current = remote;
