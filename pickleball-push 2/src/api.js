@@ -76,12 +76,13 @@ export async function enablePush(friendId) {
   }
 }
 
-// Ask the server to push a notification to one friend.
-export async function notifyFriend(friendId, title, body) {
+// Ask the server to notify one friend: push if they've installed the app,
+// otherwise email (if we have their address).
+export async function notifyFriend(friendId, title, body, email, emailText) {
   try {
     await api("/api/notify", {
       method: "POST",
-      body: JSON.stringify({ friendId, title, body }),
+      body: JSON.stringify({ friendId, title, body, email: email || "", emailText: emailText || "", name: "" }),
     });
   } catch (e) {}
 }
