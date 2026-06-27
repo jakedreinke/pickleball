@@ -34,6 +34,36 @@ const UP_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const useUpstash = !!(UP_URL && UP_TOKEN);
 const mem = new Map();
 
+/* ----------------------------------------------------------------------
+   Email (optional). If a Brevo API key + sender are set, the app will
+   EMAIL anyone who hasn't installed the app, as a fallback for push.
+   Free, no domain needed — just verify your sender address in Brevo.
+---------------------------------------------------------------------- */
+const BREVO_KEY = process.env.BREVO_API_KEY || "";
+const SENDER_EMAIL = process.env.SENDER_EMAIL || "";
+const SENDER_NAME = process.env.SENDER_NAME || "Kristin's Pickleball Agent";
+const emailReady = !!(BREVO_KEY && SENDER_EMAIL);
+
+async function sendEmail(to, name, subject, text) {
+  if (!emailReady) return false;
+  try {
+    const r = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: { "api-key": BREVO_KEY, "Content-Type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        sender: { email: SENDER_EMAIL, name: SENDER_NAME },
+        to: [{ email: to, name: name || to }],
+        subject,
+        textContent: text,
+        htmlContent: `<p>${text.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1">$1</a>')}</p>`,
+      }),
+    });
+    return r.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function upstash(cmd) {
   const r = await fetch(UP_URL, {
     method: "POST",
@@ -88,27 +118,37 @@ app.post("/api/subscribe", async (req, res) => {
 });
 
 app.post("/api/notify", async (req, res) => {
-  const { friendId, title, body } = req.body || {};
+  const { friendId, title, body, email, emailText, name } = req.body || {};
   if (!friendId) return res.status(400).json({ error: "missing friendId" });
-  if (!pushReady) return res.json({ sent: 0, note: "push not configured" });
   const subs = (await kvGet(SUBS_KEY)) || {};
   const list = subs[friendId] || [];
-  const payload = JSON.stringify({ title: title || "Pickleball 🏓", body: body || "", url: "/" });
-  let sent = 0;
-  const keep = [];
-  for (const sub of list) {
-    try {
-      await webpush.sendNotification(sub, payload);
-      keep.push(sub);
-      sent++;
-    } catch (err) {
-      // 404/410 = subscription expired; drop it. Otherwise keep it.
-      if (err.statusCode !== 404 && err.statusCode !== 410) keep.push(sub);
+
+  // 1) If they've installed the app, send a push notification.
+  if (list.length && pushReady) {
+    const payload = JSON.stringify({ title: title || "Pickleball 🏓", body: body || "", url: "/" });
+    let sent = 0;
+    const keep = [];
+    for (const sub of list) {
+      try {
+        await webpush.sendNotification(sub, payload);
+        keep.push(sub);
+        sent++;
+      } catch (err) {
+        if (err.statusCode !== 404 && err.statusCode !== 410) keep.push(sub);
+      }
     }
+    subs[friendId] = keep;
+    await kvSet(SUBS_KEY, subs);
+    if (sent > 0) return res.json({ sent, channel: "push" });
   }
-  subs[friendId] = keep;
-  await kvSet(SUBS_KEY, subs);
-  res.json({ sent });
+
+  // 2) Otherwise, fall back to email if we have an address.
+  if (email && emailText && emailReady) {
+    const ok = await sendEmail(email, name, title || "You're invited to pickleball 🏓", emailText);
+    return res.json({ sent: ok ? 1 : 0, channel: ok ? "email" : "none" });
+  }
+
+  res.json({ sent: 0, channel: "none" });
 });
 
 /* ------------------- serve the built app ------------------- */
@@ -119,5 +159,5 @@ app.get("*", (req, res) => res.sendFile(path.join(dist, "index.html")));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Pickleball app running on port ${PORT}`);
-  console.log(`  push: ${pushReady ? "ON" : "OFF (set VAPID keys)"} · storage: ${useUpstash ? "Upstash" : "in-memory (not saved)"}`);
+  console.log(`  push: ${pushReady ? "ON" : "OFF (set VAPID keys)"} · storage: ${useUpstash ? "Upstash" : "in-memory (not saved)"} · email: ${emailReady ? "ON" : "OFF (set Brevo key)"}`);
 });
